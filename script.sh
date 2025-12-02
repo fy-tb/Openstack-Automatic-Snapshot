@@ -12,7 +12,7 @@ echo "Script ran at $(date)"
 
 ##########################################################
 
-# Specify where you Openstack RC File - instructions: https://www.cloudvps.com/knowledgebase/entry/2856#Openstack%20RC%20FILE
+# Specify where you Openstack RC File - instructions on where to find your OpenRC file: https://www.transip.eu/knowledgebase/7372-where-are-openstack-api-credentials/
 # You can also specify the RC file location like: `./script.sh <rcfile location>`
 rcFile="${1:-/usr/local/rcfile.sh}"
 
@@ -32,7 +32,7 @@ newVolumeSnapshots=()
 if [ -f "$rcFile" ]; then
   source "$rcFile"
 else
-  echo "Make sure you specify the Openstack RC-FILE - instructions: https://www.cloudvps.com/knowledgebase/entry/2856#Openstack%20RC%20FILE"
+  echo "Make sure you specify the Openstack RC-FILE - instructions on where to find your OpenRC file: https://www.transip.eu/knowledgebase/7372-where-are-openstack-api-credentials/"
   exit 1
 fi
 
