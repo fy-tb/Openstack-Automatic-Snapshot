@@ -1,5 +1,8 @@
 #!/bin/bash
 
+exec >> /var/log/autoSnapshot.log 2>&1
+echo "Script ran at $(date)"
+
 ##########################################################
 
 # Project: Openstack Automatic Snapshots
@@ -13,52 +16,55 @@
 # You can also specify the RC file location like: `./script.sh <rcfile location>`
 rcFile="${1:-/usr/local/rcfile.sh}"
 
-# Specify the amount of days before the snapshot should be removed
-retentionDays=14
-
 ###############################
 # DO NOT EDIT BELOW THIS LINE #
 ###############################
 
 # Set Variables
 date=$(date +"%Y-%m-%d")
-expireTime="$retentionDays days ago"
-epochExpire=$(date --date "$expireTime" +'%s')
+dateForName=$(date +"%Y-%m-%d-%T")
+
+# Arrays to remember which snapshots we create in this run
+newInstanceSnapshots=()
+newVolumeSnapshots=()
 
 # If RC file exists load the rcfile, otherwise announce it does not exist and exit script with exit code 1
 if [ -f "$rcFile" ]; then
-    source $rcFile
+  source "$rcFile"
 else
-    echo "Make sure you specify the Openstack RC-FILE - instructions: https://www.cloudvps.com/knowledgebase/entry/2856#Openstack%20RC%20FILE"
-    exit 1
+  echo "Make sure you specify the Openstack RC-FILE - instructions: https://www.cloudvps.com/knowledgebase/entry/2856#Openstack%20RC%20FILE"
+  exit 1
 fi
 
 ##########################
-#   Snapshot Creation    #
+# Snapshot Creation      #
 ##########################
-
 # Announce snapshot creation
 printf '%*s\n' "${COLUMNS:-$(tput cols)}" '' | tr ' ' -
 echo "Creating instance snapshots!"
 
 # If an instance has the autoSnapshot metadata tag is true create snapshots!
 for instance in $(openstack server list -c ID -f value); do
-    # Retrieve the required info from the instance.
-    properties=$(openstack server show $instance -c properties -f value)
-    instanceName=$(openstack server show ${instance} -c name -f value)
+  # Retrieve the required info from the instance.
+  properties=$(openstack server show "$instance" -c properties -f value)
+  instanceName=$(openstack server show "$instance" -c name -f value)
 
-    # Check if the autoSnapshot is set to true, if this is the case create a snapshot of that instance, otherwise skip the instance.
-    if [[ $properties =~ "autoSnapshot='true'" ]]; then
-        echo "Creating snapshot of instance: ${instanceName} - ${instance}"
-        snapshotID=$(openstack server image create ${instance} -c id -f value  --name "autoSnapshot_${date}_${instanceName}" | xargs)
-        openstack image set $snapshotID --tag autoSnapshot
-        # If snapshotSync is set to true, disable image type so image will sync over all DC's
-        if [[ $properties =~ "snapshotSync='true'" ]]; then
-            openstack image unset $snapshotID --property image_type
-        fi
-    else
-        echo "Skipping instance! Metadata key not set: ${instanceName} - ${instance}"
+  # Check if the autoSnapshot is set to true, if this is the case create a snapshot of that instance, otherwise skip the instance.
+  if [[ $properties =~ "{'autoSnapshot': 'true'}" ]]; then
+    echo "Creating snapshot of instance: ${instanceName} - ${instance}"
+    snapshotID=$(openstack server image create "$instance" -c id -f value --name "autoSnapshot_${dateForName}_${instanceName}" | xargs)
+    openstack image set "$snapshotID" --tag autoSnapshot
+
+    # Remember this snapshot so we don't delete it later
+    newInstanceSnapshots+=("$snapshotID")
+
+    # If snapshotSync is set to true, disable image type so image will sync over all DC's
+    if [[ $properties =~ "snapshotSync='true'" ]]; then
+      openstack image unset "$snapshotID" --property image_type
     fi
+  else
+    echo "Skipping instance! Metadata key not set: ${instanceName} - ${instance}"
+  fi
 done
 
 # Announce volume snapshot creation
@@ -67,67 +73,80 @@ echo "Creating volume snapshots!"
 
 # If an instance has the autoSnapshot metadata tag is true create snapshots!
 for volume in $(openstack volume list -c ID -f value); do
-    # Retrieve the required info from the instance.
-    properties=$(openstack volume show $volume -c properties -f value | sed 's/ //g')
-    volumeName=$(openstack volume show ${volume} -c name -f value)
+  # Retrieve the required info from the volume.
+  properties=$(openstack volume show "$volume" -c properties -f value | sed 's/ //g')
+  volumeName=$(openstack volume show "$volume" -c name -f value)
 
-    # Check if the autoSnapshot is set to true, if this is the case create a snapshot of that instance, otherwise skip the instance.
-    if [[ $properties == *"'autoSnapshot':'true'"* ]]; then
-        echo "Creating snapshot of volume: ${volumeName} - ${volume}"
-        snapshotID=$(openstack volume snapshot create ${volume} -c id -f value --description "autoSnapshot_${date}_${volumeName}" | xargs)
-        openstack volume snapshot set $snapshotID --property autoSnapshot=true --name "autoSnapshot_${date}_${volumeName}"
-    else
-        echo "Skipping volume! Metadata key not set: ${volumeName} - ${volume}"
-    fi
+  # Check if the autoSnapshot is set to true, if this is the case create a snapshot of that volume, otherwise skip the volume.
+  if [[ $properties == *"'autoSnapshot':'true'"* ]]; then
+    echo "Creating snapshot of volume: ${volumeName} - ${volume}"
+    snapshotID=$(openstack volume snapshot create "$volume" -c id -f value --description "autoSnapshot_${date}_${volumeName}" | xargs)
+    openstack volume snapshot set "$snapshotID" --property autoSnapshot=true --name "autoSnapshot_${date}_${volumeName}"
+
+    # Remember this snapshot so we don't delete it later
+    newVolumeSnapshots+=("$snapshotID")
+  else
+    echo "Skipping volume! Metadata key not set: ${volumeName} - ${volume}"
+  fi
 done
 
 ##########################
-#   Snapshot Deletion    #
+# Snapshot Deletion      #
 ##########################
 
 # Announce snapshot deletion
 printf '%*s\n' "${COLUMNS:-$(tput cols)}" '' | tr ' ' -
 echo "Deleting old instance snapshots!"
 
-# Get all snapshot/image uuid's which include autoSnapshot in their name
+# Get all snapshot/image uuid's which include autoSnapshot tag
 for image in $(openstack image list --tag autoSnapshot -f value -c ID); do
 
-    # Get the epochtimestamp from when the snapshot wat created
-    epochCreated=$(date --date "$(openstack image show ${image} -f value -c created_at)" "+%s")
-
-    # If the snapshot is older then the above specified in variable expireTime delete the snapshot
-    if [ $epochCreated -lt $epochExpire ]; then
-        echo "Deleting old snapshot: ${image}"
-        openstack image delete $image
-    else
-        echo "Skipping snapshot: ${image}"
+  # Check if this image was created in this run
+  keep=false
+  for keep_id in "${newInstanceSnapshots[@]}"; do
+    if [[ "$image" == "$keep_id" ]]; then
+      keep=true
+      break
     fi
+  done
+
+  if [ "$keep" = false ]; then
+    echo "Deleting old snapshot: ${image}"
+    openstack image delete "$image"
+  else
+    echo "Keeping latest snapshot: ${image}"
+  fi
 done
 
 # Announce volume snapshot deletion
 printf '%*s\n' "${COLUMNS:-$(tput cols)}" '' | tr ' ' -
 echo "Deleting old volume snapshots!"
 
-# Get all snapshot/image uuid's which include autoSnapshot in their name
+# Get all volume snapshot uuid's
 for vsnapshot in $(openstack volume snapshot list -c ID -f value); do
 
-    # Check if the snapshot name starts with autoSnapshot
-    vsnapshotName=$(openstack volume snapshot show ${vsnapshot} -c name -f value)
-    if [[ $vsnapshotName == "autoSnapshot"* ]]; then
+  # Check if the snapshot name starts with autoSnapshot
+  vsnapshotName=$(openstack volume snapshot show "$vsnapshot" -c name -f value)
+  if [[ $vsnapshotName == autoSnapshot* ]]; then
 
-        # Get the epochtimestamp from when the snapshot wat created
-        epochCreated=$(date --date "$(openstack volume snapshot show ${vsnapshot} -f value -c created_at)" "+%s")
+    # Check if this snapshot was created in this run
+    keep=false
+    for keep_id in "${newVolumeSnapshots[@]}"; do
+      if [[ "$vsnapshot" == "$keep_id" ]]; then
+        keep=true
+        break
+      fi
+    done
 
-        # If the snapshot is older then the above specified in variable expireTime delete the snapshot
-        if [ $epochCreated -lt $epochExpire ]; then
-            echo "Deleting old volume snapshot: ${vsnapshot}"
-            openstack volume snapshot delete $vsnapshot
-        else
-            echo "Skipping volume snapshot: ${vsnapshot}"
-        fi
+    if [ "$keep" = false ]; then
+      echo "Deleting old volume snapshot: ${vsnapshot}"
+      openstack volume snapshot delete "$vsnapshot"
     else
-        echo "Skipping volume snapshot: ${vsnapshot}"
+      echo "Keeping latest volume snapshot: ${vsnapshot}"
     fi
+  else
+    echo "Skipping volume snapshot (name does not start with autoSnapshot): ${vsnapshot}"
+  fi
 done
 
 # Announce the script has finished and exit the script with errorcode 0
