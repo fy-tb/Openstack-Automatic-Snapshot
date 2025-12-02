@@ -16,6 +16,12 @@ echo "Script ran at $(date)"
 # You can also specify the RC file location like: `./script.sh <rcfile location>`
 rcFile="${1:-/usr/local/rcfile.sh}"
 
+# How many instance snapshots (images) with tag autoSnapshot to keep
+KEEP_INSTANCE_SNAPSHOTS=1
+
+# How many volume snapshots with name starting with "autoSnapshot" to keep
+KEEP_VOLUME_SNAPSHOTS=1
+
 ###############################
 # DO NOT EDIT BELOW THIS LINE #
 ###############################
@@ -96,58 +102,84 @@ done
 
 # Announce snapshot deletion
 printf '%*s\n' "${COLUMNS:-$(tput cols)}" '' | tr ' ' -
-echo "Deleting old instance snapshots!"
+echo "Deleting old instance snapshots (keeping $KEEP_INSTANCE_SNAPSHOTS newest)!"
 
-# Get all snapshot/image uuid's which include autoSnapshot tag
-for image in $(openstack image list --tag autoSnapshot -f value -c ID); do
+# Get all snapshot/image UUIDs that have the autoSnapshot tag
+images=$(openstack image list --tag autoSnapshot -f value -c ID)
 
-  # Check if this image was created in this run
-  keep=false
-  for keep_id in "${newInstanceSnapshots[@]}"; do
-    if [[ "$image" == "$keep_id" ]]; then
-      keep=true
-      break
-    fi
+if [ -z "$images" ]; then
+  echo "No instance snapshots found."
+else
+  snapshot_list=""
+
+  # Build "epoch ID" list for sorting
+  for image in $images; do
+    created_at=$(openstack image show "$image" -f value -c created_at)
+    epoch_created=$(date --date "$created_at" +'%s')
+    snapshot_list="${snapshot_list}${epoch_created} ${image}\n"
   done
 
-  if [ "$keep" = false ]; then
-    echo "Deleting old snapshot: ${image}"
-    openstack image delete "$image"
+  # Sort by time (oldest first)
+  snapshots_sorted=$(printf "$snapshot_list" | sort -n)
+
+  # How many snapshots do we have?
+  total=$(printf "%s\n" "$snapshots_sorted" | wc -l | awk '{print $1}')
+
+  if [ "$total" -le "$KEEP_INSTANCE_SNAPSHOTS" ]; then
+    echo "Have $total instance snapshots, configured to keep $KEEP_INSTANCE_SNAPSHOTS -> nothing to delete."
   else
-    echo "Keeping latest snapshot: ${image}"
+    delete_count=$((total - KEEP_INSTANCE_SNAPSHOTS))
+    echo "Have $total instance snapshots, will delete $delete_count oldest."
+
+    # Take the oldest ones (the first delete_count lines) and delete them
+    to_delete=$(printf "%s\n" "$snapshots_sorted" | head -n "$delete_count" | awk '{print $2}')
+
+    for image in $to_delete; do
+      echo "Deleting old instance snapshot: $image"
+      openstack image delete "$image"
+    done
   fi
-done
+fi
 
 # Announce volume snapshot deletion
 printf '%*s\n' "${COLUMNS:-$(tput cols)}" '' | tr ' ' -
-echo "Deleting old volume snapshots!"
+echo "Deleting old volume snapshots (keeping $KEEP_VOLUME_SNAPSHOTS newest)!"
 
-# Get all volume snapshot uuid's
-for vsnapshot in $(openstack volume snapshot list -c ID -f value); do
+# Get all volume snapshot IDs
+vsnapshots=$(openstack volume snapshot list -c ID -f value)
 
-  # Check if the snapshot name starts with autoSnapshot
+snapshot_list=""
+
+# Build "epoch ID" list, but only for snapshots whose name starts with autoSnapshot
+for vsnapshot in $vsnapshots; do
   vsnapshotName=$(openstack volume snapshot show "$vsnapshot" -c name -f value)
-  if [[ $vsnapshotName == autoSnapshot* ]]; then
-
-    # Check if this snapshot was created in this run
-    keep=false
-    for keep_id in "${newVolumeSnapshots[@]}"; do
-      if [[ "$vsnapshot" == "$keep_id" ]]; then
-        keep=true
-        break
-      fi
-    done
-
-    if [ "$keep" = false ]; then
-      echo "Deleting old volume snapshot: ${vsnapshot}"
-      openstack volume snapshot delete "$vsnapshot"
-    else
-      echo "Keeping latest volume snapshot: ${vsnapshot}"
-    fi
-  else
-    echo "Skipping volume snapshot (name does not start with autoSnapshot): ${vsnapshot}"
+  if [[ "$vsnapshotName" == autoSnapshot* ]]; then
+    created_at=$(openstack volume snapshot show "$vsnapshot" -f value -c created_at)
+    epoch_created=$(date --date "$created_at" +%s)
+    snapshot_list="${snapshot_list}${epoch_created} ${vsnapshot}\n"
   fi
 done
+
+if [ -z "$snapshot_list" ]; then
+  echo "No autoSnapshot volume snapshots found."
+else
+  snapshots_sorted=$(printf "$snapshot_list" | sort -n)
+  total=$(printf "%s\n" "$snapshots_sorted" | wc -l | awk '{print $1}')
+
+  if [ "$total" -le "$KEEP_VOLUME_SNAPSHOTS" ]; then
+    echo "Have $total volume snapshots, configured to keep $KEEP_VOLUME_SNAPSHOTS -> nothing to delete."
+  else
+    delete_count=$((total - KEEP_VOLUME_SNAPSHOTS))
+    echo "Have $total autoSnapshot volume snapshots, will delete $delete_count oldest."
+
+    to_delete=$(printf "%s\n" "$snapshots_sorted" | head -n "$delete_count" | awk '{print $2}')
+
+    for vsnapshot in $to_delete; do
+      echo "Deleting old volume snapshot: $vsnapshot"
+      openstack volume snapshot delete "$vsnapshot"
+    done
+  fi
+fi
 
 # Announce the script has finished and exit the script with errorcode 0
 printf '%*s\n' "${COLUMNS:-$(tput cols)}" '' | tr ' ' -
