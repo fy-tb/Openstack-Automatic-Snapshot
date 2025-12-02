@@ -1,3 +1,4 @@
+# EVERYTHING BELOW IS EXPERIMENTAL - NOT RECOMMENDED TO USE
 # Automatic snapshots for Openstack
 This script uses the [Openstack CLI](https://docs.openstack.org/newton/user-guide/common/cli-install-openstack-command-line-clients.html)  
 This scripts is made and tested for and within the [CloudVPS Openstack environment](https://l.jhcs.nl/brpnFSPq) most functions will also work with other providers.
